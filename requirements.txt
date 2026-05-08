@@ -1,0 +1,8 @@
+selenium==4.27.1
+webdriver-manager==4.0.2
+twilio==9.4.0
+python-dotenv==1.0.1
+requests==2.32.3
+
+# GitHub Actions only needs: requests, twilio, python-dotenv
+# Selenium is only needed for local run (monitor.py Tier 2)
