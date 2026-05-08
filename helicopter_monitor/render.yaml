@@ -1,0 +1,25 @@
+services:
+  - type: worker
+    name: helicopter-monitor
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: USER_PHONE_NUMBER
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: CHECK_INTERVAL_SECONDS
+        value: "120"
+      - key: MAX_NOTIFICATION_RETRIES
+        value: "3"
+      - key: NOTIFICATION_RETRY_DELAY
+        value: "30"
