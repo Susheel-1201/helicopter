@@ -65,14 +65,16 @@ def send_sms(message: str) -> bool:
         return False
 
 
-def make_call(spoken_message: str) -> bool:
-    """Make a voice call via Twilio with TwiML <Say>. Returns True on success."""
+def make_call(spoken_message: str) -> str | None:
+    """
+    Make a voice call via Twilio with TwiML <Say>.
+    Returns the call SID if initiated, or None on failure.
+    """
     if not all([TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, USER_PHONE]):
         logger.warning("Twilio Voice not configured — skipping")
-        return False
+        return None
     try:
         client = Client(TWILIO_SID, TWILIO_TOKEN)
-        # TwiML to speak the message twice for clarity
         twiml = (
             '<Response>'
             f'<Say voice="alice" language="en-IN">{spoken_message}</Say>'
@@ -86,18 +88,58 @@ def make_call(spoken_message: str) -> bool:
             to=USER_PHONE,
         )
         logger.info("Voice call initiated — SID: %s", call.sid)
-        return True
+        return call.sid
     except Exception as e:
         logger.error("Voice call failed: %s", e)
+        return None
+
+
+def was_call_answered(call_sid: str) -> bool:
+    """
+    Check if a Twilio call was answered by polling its status.
+    Waits up to 60 seconds for the call to complete.
+    'completed' = user picked up. 'no-answer'/'busy'/'failed'/'canceled' = not picked up.
+    """
+    if not all([TWILIO_SID, TWILIO_TOKEN]):
+        return False
+    try:
+        client = Client(TWILIO_SID, TWILIO_TOKEN)
+        # Poll every 5 seconds for up to 60 seconds
+        for i in range(12):
+            call = client.calls(call_sid).fetch()
+            status = call.status
+            logger.info("Call %s status: %s", call_sid, status)
+
+            if status == "completed":
+                logger.info("User ANSWERED the call!")
+                return True
+            elif status in ("no-answer", "busy", "failed", "canceled"):
+                logger.info("User did NOT answer (status: %s)", status)
+                return False
+
+            # Still ringing or in-progress — wait and check again
+            time.sleep(5)
+
+        logger.warning("Call status check timed out after 60 seconds")
+        return False
+    except Exception as e:
+        logger.error("Failed to check call status: %s", e)
         return False
 
 
 def notify_all(redirect_url: str) -> None:
     """
-    Send notifications via all channels with retry logic.
-    Fires Telegram (fastest) first, then SMS, then voice call.
-    Repeats the full cycle up to MAX_RETRIES times.
+    Notification sequence with 1-minute gaps:
+      1. Send Telegram message
+      2. Wait 1 minute
+      3. Send SMS
+      4. Wait 1 minute
+      5. Make voice call — if user answers, STOP
+      6. If not answered, retry the whole sequence (max 2 retries)
     """
+    max_attempts = 2
+    gap_seconds = 60
+
     sms_text = (
         f"ALERT: Amarnath Helicopter Bookings are NOW OPEN!\n"
         f"URL: {redirect_url}\n"
@@ -114,26 +156,45 @@ def notify_all(redirect_url: str) -> None:
         "Please open the website and book your tickets immediately."
     )
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        logger.info("=== Notification attempt %d of %d ===", attempt, MAX_RETRIES)
+    for attempt in range(1, max_attempts + 1):
+        logger.info("=== Notification attempt %d of %d ===", attempt, max_attempts)
 
-        tg_ok = send_telegram(tg_text)
-        sms_ok = send_sms(sms_text)
-        call_ok = make_call(call_text)
+        # Step 1: Telegram
+        logger.info("Step 1: Sending Telegram message...")
+        send_telegram(tg_text)
 
-        logger.info(
-            "Attempt %d results — Telegram: %s | SMS: %s | Call: %s",
-            attempt,
-            "OK" if tg_ok else "FAIL",
-            "OK" if sms_ok else "FAIL",
-            "OK" if call_ok else "FAIL",
-        )
+        # Wait 1 minute
+        logger.info("Waiting %d seconds before SMS...", gap_seconds)
+        time.sleep(gap_seconds)
 
-        if attempt < MAX_RETRIES:
-            logger.info("Waiting %d seconds before next attempt...", RETRY_DELAY)
-            time.sleep(RETRY_DELAY)
+        # Step 2: SMS
+        logger.info("Step 2: Sending SMS...")
+        send_sms(sms_text)
 
-    logger.info("All %d notification attempts completed.", MAX_RETRIES)
+        # Wait 1 minute
+        logger.info("Waiting %d seconds before voice call...", gap_seconds)
+        time.sleep(gap_seconds)
+
+        # Step 3: Voice call + check if answered
+        logger.info("Step 3: Making voice call...")
+        call_sid = make_call(call_text)
+
+        if call_sid:
+            answered = was_call_answered(call_sid)
+            if answered:
+                logger.info("User answered the call — STOPPING notifications.")
+                return
+
+            logger.info("User did not answer the call.")
+        else:
+            logger.warning("Call could not be initiated.")
+
+        if attempt < max_attempts:
+            logger.info("Retrying full notification sequence...")
+        else:
+            logger.info("All %d attempts exhausted. User may not have responded.", max_attempts)
+
+    logger.info("Notification sequence complete.")
 
 
 if __name__ == "__main__":

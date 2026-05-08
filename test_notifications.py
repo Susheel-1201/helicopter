@@ -5,6 +5,7 @@ Run this to verify Telegram, SMS, and Voice Call all work correctly.
 
 import os
 import sys
+import time
 import logging
 import requests
 
@@ -55,14 +56,14 @@ def send_sms(message: str) -> bool:
         return False
 
 
-def make_call(spoken: str) -> bool:
+def make_call(spoken: str) -> str | None:
     sid = os.getenv("TWILIO_ACCOUNT_SID")
     token = os.getenv("TWILIO_AUTH_TOKEN")
     from_num = os.getenv("TWILIO_PHONE_NUMBER")
     to_num = os.getenv("USER_PHONE_NUMBER")
     if not all([sid, token, from_num, to_num]):
         logger.warning("Twilio Voice not configured")
-        return False
+        return None
     try:
         from twilio.rest import Client
         twiml = (
@@ -71,53 +72,89 @@ def make_call(spoken: str) -> bool:
         )
         call = Client(sid, token).calls.create(twiml=twiml, from_=from_num, to=to_num)
         logger.info("Call initiated: %s", call.sid)
-        return True
+        return call.sid
     except Exception as e:
         logger.error("Call failed: %s", e)
+        return None
+
+
+def was_call_answered(call_sid: str) -> bool:
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+    if not all([sid, token]):
+        return False
+    try:
+        from twilio.rest import Client
+        client = Client(sid, token)
+        for _ in range(12):
+            call = client.calls(call_sid).fetch()
+            logger.info("Call status: %s", call.status)
+            if call.status == "completed":
+                return True
+            if call.status in ("no-answer", "busy", "failed", "canceled"):
+                return False
+            time.sleep(5)
+        return False
+    except Exception as e:
+        logger.error("Call status check failed: %s", e)
         return False
 
 
 def main():
     logger.info("=" * 50)
-    logger.info("TEST MODE: Simulating booking detection")
+    logger.info("TEST: Simulating full notification sequence")
+    logger.info("Telegram -> 1 min -> SMS -> 1 min -> Call")
     logger.info("=" * 50)
 
     fake_url = "https://jksasb.nic.in/onlineservices/helicopter_booking.aspx"
 
-    # Test 1: Telegram
-    logger.info("--- Test 1: Telegram Message ---")
+    # Step 1: Telegram
+    logger.info("--- Step 1: Telegram Message ---")
     tg_ok = send_telegram(
         "<b>TEST ALERT: This is a test notification!</b>\n\n"
         "If you see this, Telegram notifications are working.\n"
         f"Simulated URL: {fake_url}"
     )
 
-    # Test 2: SMS
-    logger.info("--- Test 2: SMS ---")
+    # Wait 1 minute
+    logger.info("Waiting 60 seconds before SMS...")
+    time.sleep(60)
+
+    # Step 2: SMS
+    logger.info("--- Step 2: SMS ---")
     sms_ok = send_sms(
         "TEST ALERT: This is a test from Helicopter Monitor. "
         "If you receive this, SMS notifications are working!"
     )
 
-    # Test 3: Voice Call
-    logger.info("--- Test 3: Voice Call ---")
-    call_ok = make_call(
+    # Wait 1 minute
+    logger.info("Waiting 60 seconds before voice call...")
+    time.sleep(60)
+
+    # Step 3: Voice Call + answer detection
+    logger.info("--- Step 3: Voice Call (PICK UP to stop retries!) ---")
+    call_sid = make_call(
         "This is a test call from the helicopter booking monitor. "
         "If you hear this message, voice call notifications are working correctly."
     )
 
+    answered = False
+    if call_sid:
+        answered = was_call_answered(call_sid)
+
     # Summary
     logger.info("=" * 50)
     logger.info("TEST RESULTS:")
-    logger.info("  Telegram: %s", "PASS" if tg_ok else "FAIL")
-    logger.info("  SMS:      %s", "PASS" if sms_ok else "FAIL")
-    logger.info("  Call:     %s", "PASS" if call_ok else "FAIL")
+    logger.info("  Telegram:      %s", "PASS" if tg_ok else "FAIL")
+    logger.info("  SMS:           %s", "PASS" if sms_ok else "FAIL")
+    logger.info("  Call initiated: %s", "PASS" if call_sid else "FAIL")
+    logger.info("  Call answered:  %s", "YES" if answered else "NO")
     logger.info("=" * 50)
 
-    if all([tg_ok, sms_ok, call_ok]):
-        logger.info("ALL TESTS PASSED! You should receive 3 notifications on your phone.")
+    if answered:
+        logger.info("You answered! In real scenario, retries would STOP here.")
     else:
-        logger.warning("Some tests failed. Check the logs above for details.")
+        logger.info("You didn't answer. In real scenario, it would RETRY the full sequence.")
 
 
 if __name__ == "__main__":

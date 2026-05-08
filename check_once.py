@@ -7,6 +7,7 @@ Exits immediately after.
 import os
 import re
 import sys
+import time
 import logging
 import requests
 
@@ -106,14 +107,15 @@ def send_sms(message: str) -> bool:
         return False
 
 
-def make_call(spoken: str) -> bool:
+def make_call(spoken: str) -> str | None:
+    """Make a voice call. Returns call SID if initiated, None on failure."""
     sid = os.getenv("TWILIO_ACCOUNT_SID")
     token = os.getenv("TWILIO_AUTH_TOKEN")
     from_num = os.getenv("TWILIO_PHONE_NUMBER")
     to_num = os.getenv("USER_PHONE_NUMBER")
     if not all([sid, token, from_num, to_num]):
         logger.warning("Twilio Voice not configured")
-        return False
+        return None
     try:
         from twilio.rest import Client
         twiml = (
@@ -122,9 +124,35 @@ def make_call(spoken: str) -> bool:
         )
         call = Client(sid, token).calls.create(twiml=twiml, from_=from_num, to=to_num)
         logger.info("Call initiated: %s", call.sid)
-        return True
+        return call.sid
     except Exception as e:
         logger.error("Call failed: %s", e)
+        return None
+
+
+def was_call_answered(call_sid: str) -> bool:
+    """Poll Twilio call status. Returns True if user answered."""
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+    if not all([sid, token]):
+        return False
+    try:
+        from twilio.rest import Client
+        client = Client(sid, token)
+        for _ in range(12):  # Poll every 5s for up to 60s
+            call = client.calls(call_sid).fetch()
+            logger.info("Call status: %s", call.status)
+            if call.status == "completed":
+                logger.info("User ANSWERED the call!")
+                return True
+            if call.status in ("no-answer", "busy", "failed", "canceled"):
+                logger.info("User did NOT answer (status: %s)", call.status)
+                return False
+            time.sleep(5)
+        logger.warning("Call status check timed out")
+        return False
+    except Exception as e:
+        logger.error("Call status check failed: %s", e)
         return False
 
 
@@ -139,19 +167,56 @@ def main():
     # Bookings detected!
     logger.info("*** BOOKING DETECTED: %s ***", redirect_url)
 
-    send_telegram(
+    max_attempts = 2
+    gap_seconds = 60
+
+    tg_text = (
         f"<b>ALERT: Helicopter Bookings OPEN!</b>\n\n"
         f"URL: {redirect_url}\n\n"
         f"Book your tickets NOW!"
     )
-    send_sms(
+    sms_text = (
         f"ALERT: Amarnath Helicopter Bookings NOW OPEN!\n"
         f"URL: {redirect_url}\nBook immediately!"
     )
-    make_call(
+    call_text = (
         "Alert! Amarnath helicopter ticket bookings are now open. "
         "Please open the website and book your tickets immediately."
     )
+
+    for attempt in range(1, max_attempts + 1):
+        logger.info("=== Notification attempt %d of %d ===", attempt, max_attempts)
+
+        # Step 1: Telegram
+        logger.info("Step 1: Sending Telegram...")
+        send_telegram(tg_text)
+
+        # Wait 1 minute
+        logger.info("Waiting %d seconds before SMS...", gap_seconds)
+        time.sleep(gap_seconds)
+
+        # Step 2: SMS
+        logger.info("Step 2: Sending SMS...")
+        send_sms(sms_text)
+
+        # Wait 1 minute
+        logger.info("Waiting %d seconds before call...", gap_seconds)
+        time.sleep(gap_seconds)
+
+        # Step 3: Voice call + check if answered
+        logger.info("Step 3: Making voice call...")
+        call_sid = make_call(call_text)
+
+        if call_sid:
+            if was_call_answered(call_sid):
+                logger.info("User answered — STOPPING notifications.")
+                break
+            logger.info("User did not answer.")
+
+        if attempt < max_attempts:
+            logger.info("Retrying full sequence...")
+
+    logger.info("=== Notification sequence complete. ===")
 
     logger.info("=== Notifications sent. Done. ===")
 
